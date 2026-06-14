@@ -76,6 +76,16 @@ jobs:
 
       - name: 导入编译配置、自定义文件
         run: |
+          # 先校验目录与配置文件是否存在
+          if [ ! -d configs ]; then
+            echo "错误：仓库根目录缺少 configs 文件夹"
+            exit 1
+          fi
+          if [ ! -f configs/${{ env.TARGET_DEV }}.config ]; then
+            echo "错误：缺失配置文件 configs/${{ env.TARGET_DEV }}.config"
+            exit 1
+          fi
+          # 复制配置
           cp configs/${{ env.TARGET_DEV }}.config openwrt/.config
           cp diy-part1.sh diy-part2.sh openwrt/
           [ -d files ] && cp -r files openwrt/
