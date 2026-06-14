@@ -49,9 +49,11 @@ jobs:
           key: flippy-h28k-${{ github.sha }}
           restore-keys: flippy-h28k-
 
-      - name: 克隆/更新Flippy RK3528源码
+      - name: 克隆/更新Flippy RK3528源码（彻底关闭交互弹窗）
+        env:
+          # 全局禁止Git弹出终端输入框，根治Username报错
+          GIT_TERMINAL_PROMPT: 0
         run: |
-          # 关闭Git账号弹窗，解决 Username 读取报错
           git config --global core.askpass ""
           if [ ! -d openwrt ]; then
             git clone --depth=1 https://github.com/flippy/openwrt-flippy.git openwrt
