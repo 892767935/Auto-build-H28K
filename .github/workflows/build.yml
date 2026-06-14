@@ -1,31 +1,36 @@
 name: Auto-build-H28K
 
-# 仅手动触发，修改配置/脚本提交代码不会自动编译
+# 仅手动触发，修改配置不会自动编译
 on:
   workflow_dispatch:
 
-# 授予仓库写入权限，用于创建Tag、Release、上传固件
+# 仓库写入权限，创建Tag/Release
 permissions:
   contents: write
 
 env:
   TZ: Asia/Shanghai
-  # Git Tag合法时间戳，下划线替代冒号，解决发布校验失败
   BUILD_SAFE: ${{ github.run_number }}-$(date +%Y%m%d_%H_%M)
-  # Release标题展示用完整时分时间，仅展示不用于Tag
   BUILD_RAW: ${{ github.run_number }}-$(date +%Y%m%d-%H:%M)
-  # Flippy F大RK3568 OpenWrt源码地址
+  # ImmortalWrt 源码（用于编译rootfs文件系统）
+  IMMORTAL_SRC: https://github.com/immortalwrt/immortalwrt.git
+  # Flippy 仓库（仅用于拉取RK打包img脚本，不编译源码）
   FLIPPY_REPO: https://github.com/flippy/openwrt-flippy.git
   TARGET_DEV: h28k
+  # RK3528设备标识
+  RK_CHIP: rk3528
 
 jobs:
-  build_h28k:
+  build_rootfs:
     runs-on: ubuntu-22.04
+    env:
+      # 全局关闭Git交互弹窗，根治username读取报错
+      GIT_TERMINAL_PROMPT: 0
     steps:
-      - name: 拉取仓库配置、DIY脚本、自定义files文件
+      - name: 拉取仓库配置、DIY脚本、自定义files
         uses: actions/checkout@v4
 
-      - name: 清理系统冗余，释放磁盘空间
+      - name: 磁盘空间清理
         run: |
           sudo apt remove -y docker.io containerd runc || true
           sudo apt autoremove -y
@@ -37,41 +42,39 @@ jobs:
           sudo timedatectl set-timezone Asia/Shanghai
           echo "TERM=xterm" >> $GITHUB_ENV
 
-      - name: 安装F大源码全套编译依赖
+      - name: 安装全套编译依赖（ImmortalWrt + Flippy打包共用）
         run: |
           sudo apt update
-          sudo apt install -y build-essential flex bison gawk libncurses-dev libssl-dev python3 python3-pip git libelf-dev python3-pyelftools unzip zip aria2 dos2unix curl wget rsync
+          sudo apt install -y build-essential flex bison gawk libncurses-dev libssl-dev python3 python3-pip git libelf-dev python3-pyelftools unzip zip aria2 dos2unix curl wget rsync parted kpartx u-boot-tools mtools
 
-      - name: 缓存OpenWrt源码与dl下载目录，二次编译加速
+      - name: 缓存 ImmortalWrt 源码 & dl目录
         uses: actions/cache@v4
         with:
           path: openwrt
-          key: flippy-h28k-${{ github.sha }}
-          restore-keys: flippy-h28k-
+          key: immortal-h28k-${{ github.sha }}
+          restore-keys: immortal-h28k-
 
-      - name: 克隆/更新Flippy RK3528源码（彻底关闭交互弹窗）
-        env:
-          # 全局禁止Git弹出终端输入框，根治Username报错
-          GIT_TERMINAL_PROMPT: 0
+      - name: 克隆/更新 ImmortalWrt 源码（编译rootfs.tar.gz用）
         run: |
           git config --global core.askpass ""
           if [ ! -d openwrt ]; then
-            git clone --depth=1 https://github.com/flippy/openwrt-flippy.git openwrt
+            git clone --depth=1 ${{ env.IMMORTAL_SRC }} openwrt
           fi
           cd openwrt
           git pull --depth=1
-      - name: 校验必需配置文件与DIY脚本
+
+      - name: 校验配置文件完整性
         run: |
           if [ ! -f configs/${{ env.TARGET_DEV }}.config ]; then
-            echo "【致命错误】缺失配置文件 configs/${{ env.TARGET_DEV }}.config"
+            echo "【致命错误】缺失 configs/${{ env.TARGET_DEV }}.config"
             exit 1
           fi
           if [ ! -f diy-part1.sh ] || [ ! -f diy-part2.sh ]; then
-            echo "【致命错误】缺失 diy-part1.sh / diy-part2.sh 插件脚本"
+            echo "【致命错误】缺失 diy-part1.sh / diy-part2.sh"
             exit 1
           fi
 
-      - name: 导入编译配置、自定义文件、DIY脚本
+      - name: 导入编译配置、自定义文件
         run: |
           cp configs/${{ env.TARGET_DEV }}.config openwrt/.config
           cp diy-part1.sh diy-part2.sh openwrt/
@@ -83,80 +86,113 @@ jobs:
           chmod +x diy-part1.sh
           ./diy-part1.sh
 
-      - name: 更新并安装feeds软件源
+      - name: 更新&安装feeds软件源
         run: |
           cd openwrt
           ./scripts/feeds clean
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
-      - name: 执行 diy-part2.sh 调整代理、系统参数
+      - name: 执行 diy-part2.sh 系统参数微调
         run: |
           cd openwrt
           chmod +x diy-part2.sh
           ./diy-part2.sh
 
-      - name: make defconfig 同步编译配置
+      - name: make defconfig 同步配置
         run: |
           cd openwrt
           make defconfig
 
-      - name: 预下载全部源码依赖包
+      - name: 预下载全部源码依赖
         run: |
           cd openwrt
           make download -j$(nproc)
 
-      - name: 编译H28K固件（减半线程防内存OOM）
+      - name: 编译 ImmortalWrt rootfs.tar.gz（减半线程防OOM）
         run: |
           cd openwrt
-          make -j$(( $(nproc) / 2 )) V=s 2>&1 | tee ../build-${{ env.TARGET_DEV }}.log
+          make -j$(( $(nproc) / 2 )) V=s 2>&1 | tee ../build-rootfs-${{ env.TARGET_DEV }}.log
 
-      - name: 上传完整编译日志（排错使用）
+      - name: 上传编译日志
         uses: actions/upload-artifact@v4
         with:
-          name: build-log-h28k
-          path: build-${{ env.TARGET_DEV }}.log
+          name: build-log-rootfs-h28k
+          path: build-rootfs-${{ env.TARGET_DEV }}.log
 
-      - name: 提取全部H28K刷机镜像（factory全新包+sysupgrade升级包）
+      - name: 提取编译产出 rootfs.tar.gz
         run: |
-          mkdir -p firmware/${{ env.TARGET_DEV }}
+          mkdir -p rootfs_output
           cd openwrt
-          echo "===== 检索RK3568 H28K固件 ====="
-          find bin/targets/rockchip/rk3568 -name "*h28k*sysupgrade.img*" -o -name "*h28k*factory.img*"
-          find bin/targets/rockchip/rk3568 -name "*h28k*sysupgrade.img*" -o -name "*h28k*factory.img*" -exec cp {} ../firmware/${{ env.TARGET_DEV }}/ \;
-          echo "===== 已提取固件列表 ====="
-          ls -la ../firmware/${{ env.TARGET_DEV }}/
+          # 提取rockchip rk3528根文件系统压缩包
+          find bin/targets/rockchip/${{ env.RK_CHIP }} -name "*rootfs.tar.gz" -exec cp {} ../rootfs_output/ \;
+          ls -la ../rootfs_output/
 
-      - name: 上传固件产物，供Release打包
+      - name: 上传 rootfs.tar.gz 产物，供Flippy打包img
         uses: actions/upload-artifact@v4
         with:
-          name: firmware-h28k
-          path: firmware/${{ env.TARGET_DEV }}/
+          name: rootfs-tar-h28k
+          path: rootfs_output/
 
-  # 编译完成后自动打包、发布Release
-  release_firmware:
-    needs: build_h28k
+  # 独立Job：使用Flippy脚本打包rootfs为可烧录img镜像
+  pack_img:
+    needs: build_rootfs
     runs-on: ubuntu-22.04
+    env:
+      GIT_TERMINAL_PROMPT: 0
     steps:
-      - name: 下载全部编译固件文件
+      - name: 下载 ImmortalWrt 编译好的 rootfs.tar.gz
         uses: actions/download-artifact@v4
         with:
-          path: ./temp_firmware
+          path: ./rootfs_source
 
-      - name: 批量打包固件（合集包+独立包+裸镜像）
+      - name: 拉取 Flippy 仓库（仅拿RK打包脚本，不编译源码）
+        run: |
+          git config --global core.askpass ""
+          git clone --depth=1 ${{ env.FLIPPY_REPO }} flippy-tools
+
+      - name: 执行Flippy RK3528打包脚本，生成factory/sysupgrade img
+        run: |
+          # 复制rootfs到flippy打包目录
+          cp rootfs_source/*.tar.gz flippy-tools/
+          cd flippy-tools
+          # 调用Flippy打包脚本，传入rk3528 h28k参数生成img
+          bash build-rockchip.sh ${{ env.RK_CHIP }} ${{ env.TARGET_DEV }} *.tar.gz
+          # 输出img统一移动到固件目录
+          mkdir -p ../firmware_img
+          find ./ -name "*${{ env.TARGET_DEV }}*.img*" -exec cp {} ../firmware_img/ \;
+          ls -la ../firmware_img/
+
+      - name: 上传打包完成的img镜像
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-img-h28k
+          path: firmware_img/
+
+  # 全部流程完成后自动打包、发布Release
+  release_firmware:
+    needs: pack_img
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 下载所有产物（rootfs+img镜像）
+        uses: actions/download-artifact@v4
+        with:
+          path: ./all_firmware_temp
+
+      - name: 批量打包固件合集
         run: |
           mkdir release_dir
-          cp -r temp_firmware/firmware-* release_dir/
+          cp -r all_firmware_temp/* release_dir/
 
-          # 完整固件合集压缩包
+          # 完整固件合集包
           cd release_dir
-          zip -r H28K_All_Firmware_${{ env.BUILD_SAFE }}.zip firmware-h28k/
+          zip -r H28K_All_Firmware_${{ env.BUILD_SAFE }}.zip rootfs-tar-h28k/ firmware-img-h28k/
           mv H28K_All_Firmware_${{ env.BUILD_SAFE }}.zip ../
 
-          # 单设备独立压缩包
-          zip -r ../H28K_Single_Pack_${{ env.BUILD_SAFE }}.zip firmware-h28k/
+          # 单独img刷机包
+          zip -r ../H28K_Img_Pack_${{ env.BUILD_SAFE }}.zip firmware-img-h28k/
 
-          # 提取原始img镜像到根目录，Release可直接下载裸文件
+          # 提取裸img镜像到根目录
           find release_dir -type f -name "*.img" -o -name "*.img.gz" -exec cp {} ../ \;
 
       - name: 创建GitHub Release发布固件
@@ -165,28 +201,19 @@ jobs:
           tag_name: H28K_Build_${{ env.BUILD_SAFE }}
           name: Auto-build-H28K 编译固件 ${{ env.BUILD_RAW }}
           body: |
-            ## 编译基础信息
-            项目名称：Auto-build-H28K
-            源码来源：Flippy F大 RK3568 OpenWrt
+            ## 编译信息
+            项目：Auto-build-H28K
+            RootFS源码：ImmortalWrt
+            Img打包工具：Flippy RK打包脚本
+            芯片：RK3528 设备：H28K
             运行编号：${{ github.run_number }}
-            编译时间：${{ env.BUILD_RAW }}
-            默认后台地址：192.168.1.10
-            登录账号：root | 默认密码：password
+            后台地址：192.168.1.10
+            账号：root | 默认密码：password
 
-            ## 适配设备
-            通用普通版 H28K RK3568
-
-            ## 预装内置组件
-            - 完整中文LuCI界面 + Argon美化主题
-            - OpenClash 全套依赖、Lucky轻量代理
-            - UPnP端口转发、USB存储自动挂载
-            - F2FS/EXT4文件系统、TCP BBR拥塞控制
-            - htop、iperf3、磁盘工具、无线调试工具
-
-            ## 文件下载说明
-            1. H28K_All_Firmware_xxx.zip：完整固件合集包
-            2. H28K_Single_Pack_xxx.zip：独立H28K固件压缩包
-            3. *.img / *.img.gz：裸刷机镜像，无需解压直接写入U盘/硬盘
+            ## 文件说明
+            1. H28K_All_Firmware_xxx.zip：完整合集（rootfs.tar.gz + 刷机img）
+            2. H28K_Img_Pack_xxx.zip：仅可U盘烧录img镜像
+            3. *.img / *.img.gz：裸刷机镜像，Etcher/dd直接写入
           files: |
             *.zip
             *.img
