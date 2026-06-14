@@ -54,12 +54,10 @@ jobs:
           # 关闭Git账号弹窗，解决 Username 读取报错
           git config --global core.askpass ""
           if [ ! -d openwrt ]; then
-            # ghproxy镜像加速，解决github访问失败
-            git clone --depth=1 https://mirror.ghproxy.com/https://github.com/flippy/openwrt-flippy.git openwrt
+            git clone --depth=1 https://github.com/flippy/openwrt-flippy.git openwrt
           fi
           cd openwrt
           git pull --depth=1
-
       - name: 校验必需配置文件与DIY脚本
         run: |
           if [ ! -f configs/${{ env.TARGET_DEV }}.config ]; then
