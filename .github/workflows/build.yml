@@ -49,10 +49,13 @@ jobs:
           key: flippy-h28k-${{ github.sha }}
           restore-keys: flippy-h28k-
 
-      - name: 克隆/更新Flippy RK3568源码
+      - name: 克隆/更新Flippy RK3528源码
         run: |
+          # 关闭Git账号弹窗，解决 Username 读取报错
+          git config --global core.askpass ""
           if [ ! -d openwrt ]; then
-            git clone --depth=1 ${{ env.FLIPPY_REPO }} openwrt
+            # ghproxy镜像加速，解决github访问失败
+            git clone --depth=1 https://mirror.ghproxy.com/https://github.com/flippy/openwrt-flippy.git openwrt
           fi
           cd openwrt
           git pull --depth=1
